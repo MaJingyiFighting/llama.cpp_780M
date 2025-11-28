@@ -1,0 +1,70 @@
+name: Build 780M ROCm Image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Free Disk Space (Manual)
+        run: |
+          echo "Listing usage before cleanup..."
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          echo "Listing usage after cleanup..."
+          df -h
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lowercase Repo Name
+        run: |
+          echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> ${GITHUB_ENV}
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Patch Dockerfile for 780M (Enable UMA & Disable ROCWMMA)
+        run: |
+          DOCKERFILE=".devops/rocm.Dockerfile"
+          echo "Patching $DOCKERFILE..."
+          sed -i 's/-DGGML_HIP=ON/-DGGML_HIP=ON -DGGML_HIP_UMA=ON/g' "$DOCKERFILE"
+          sed -i 's/-DGGML_HIP_ROCWMMA_FATTN=ON/-DGGML_HIP_ROCWMMA_FATTN=OFF/g' "$DOCKERFILE"
+          grep "GGML_HIP_UMA" "$DOCKERFILE" || { echo "Failed to inject UMA flag"; exit 1; }
+          grep "GGML_HIP_ROCWMMA_FATTN=OFF" "$DOCKERFILE" || { echo "Failed to disable ROCWMMA"; exit 1; }
+          echo "Dockerfile patched successfully."
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: .devops/rocm.Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:780m-latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:780m-${{ github.sha }}
+          build-args: |
+            ROCM_DOCKER_ARCH=gfx1103
+            AMDGPU_TARGETS=gfx1103
